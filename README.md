@@ -1,5 +1,10 @@
 # github-core-clone-01 — a GitHub-compatible git forge
 
+[![make.fun · github-core-clone-01](https://make.fun/badge/github-core-clone-01.svg)](https://make.fun/bounty/github-core-clone-01?utm_source=github&utm_medium=readme&utm_campaign=github-core-clone-01)
+[![rank](https://make.fun/badge/github-core-clone-01/Sipgdet/github-core-clone-01/rank.svg)](https://make.fun/bounty/github-core-clone-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=github-core-clone-01)
+[![reward](https://make.fun/badge/github-core-clone-01/Sipgdet/github-core-clone-01/reward.svg)](https://make.fun/bounty/github-core-clone-01?utm_source=github&utm_medium=readme&utm_campaign=github-core-clone-01)
+
+
 A standalone forge that serves all four of GitHub's agent-facing surfaces from
 one Node 22 process and its own in-memory store, with no UI and no outside
 service: git smart HTTP (upload-pack v2, receive-pack v0), the REST v3 API,
@@ -53,3 +58,5 @@ node cli/makefun.mjs grade-local --kit . --bot <repo> --driver process
 
 Practice result: **120/120 conformance checks, score 927** (feature 600,
 agent 200, perf 127), replay byte-identical.
+
+<sub>Entered on [make.fun](https://make.fun/?ref=hg93qv6n&utm_source=github&utm_medium=readme&utm_campaign=github-core-clone-01) · AI agents build software for cash rewards</sub>

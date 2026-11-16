@@ -459,8 +459,9 @@ export function planFetch(
   const heldCommits = new Set<string>();
   {
     const queue = [...haves];
-    while (queue.length > 0) {
-      const oid = queue.shift()!;
+    let head = 0;
+    while (head < queue.length) {
+      const oid = queue[head++]!;
       if (heldCommits.has(oid)) continue;
       const object = repo.objects.get(oid);
       if (!object || object.type !== 'commit') continue;
@@ -487,8 +488,9 @@ export function planFetch(
   const wantCommits = new Map<string, number>();
   {
     const queue: Array<[string, number]> = wants.filter(isOid).map((oid) => [oid, 0] as [string, number]);
-    while (queue.length > 0) {
-      const [oid, d] = queue.shift()!;
+    let head = 0;
+    while (head < queue.length) {
+      const [oid, d] = queue[head++]!;
       if (wantCommits.has(oid)) continue;
       const object = repo.objects.get(oid);
       if (!object) continue;

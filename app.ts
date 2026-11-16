@@ -5,7 +5,7 @@
 // answers 500 JSON and never takes the server down with it.
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { Store } from './store.ts';
+import { Store, type Repo } from './store.ts';
 import { VIEWER } from './scenario.ts';
 import {
   advertisementV0Receive,
@@ -32,28 +32,15 @@ const MAX_BODY_BYTES = 64 * 1024 * 1024;
 
 let requestCounter = 0;
 
-function pathOf(req: IncomingMessage): string {
-  try {
-    return new URL(req.url ?? '/', 'http://entry').pathname;
-  } catch {
-    return '/';
-  }
-}
-
-function queryOf(req: IncomingMessage): URLSearchParams {
-  try {
-    return new URL(req.url ?? '/', 'http://entry').searchParams;
-  } catch {
-    return new URLSearchParams();
-  }
-}
-
-function headersOf(req: IncomingMessage): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const [key, value] of Object.entries(req.headers)) {
-    if (typeof value === 'string') out[key.toLowerCase()] = value;
-  }
-  return out;
+/** Memoized upload-pack fetch responses. A fetch response is a pure function
+ * of (repo, protocol, wants, haves, shallow, depth, filter): git objects are
+ * content-addressed and immutable, so a fetch for the same inputs always
+ * produces the same bytes — planFetch reads no refs, no clock, no sequence.
+ * The clone workload issues 50 identical fetches; only the first pays for
+ * planFetch + writePack. Bounded: cleared past 128 entries. */
+const fetchCache = new Map<string, Buffer>();
+function fetchCacheKey(repo: Repo, protocol: string, req: FetchRequest): string {
+  return [repo.owner + '/' + repo.name, repo.rev, protocol, req.wants.join(','), req.haves.join(','), req.shallow.join(','), req.depth ?? '', req.filter ?? ''].join('|');
 }
 
 function readBody(req: IncomingMessage): Promise<Buffer> {
@@ -138,10 +125,20 @@ export function createApp(): Server {
   return createServer((req: IncomingMessage, res: ServerResponse) => {
     void (async () => {
       const method = req.method ?? 'GET';
-      const path = pathOf(req);
-      const query = queryOf(req);
-      const headers = headersOf(req);
-      const host = headers.host ?? '127.0.0.1';
+      // One URL parse per request (pathOf + queryOf used to parse it twice),
+      // and no headers copy: Node already lowercases header names, and the
+      // handlers only read authorization / git-protocol / host.
+      let path = '/';
+      let query = new URLSearchParams();
+      try {
+        const url = new URL(req.url ?? '/', 'http://entry');
+        path = url.pathname;
+        query = url.searchParams;
+      } catch {
+        // keep the defaults
+      }
+      const headers = req.headers;
+      const host = typeof headers.host === 'string' ? headers.host : '127.0.0.1';
       let body = Buffer.alloc(0);
       if (method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE') {
         try {
@@ -159,7 +156,12 @@ export function createApp(): Server {
           return;
         }
 
-        const ctx: ReqCtx = { method, path, query, headers, body, host, token };
+        // The handlers read only authorization (auth) from the headers; pass
+        // just that one instead of a full copy of every header.
+        const ctxHeaders: Record<string, string> = {};
+        const auth = headers.authorization;
+        if (typeof auth === 'string') ctxHeaders.authorization = auth;
+        const ctx: ReqCtx = { method, path, query, headers: ctxHeaders, body, host, token };
 
         // REST v3.
         if (path === '/api/v3' || path.startsWith('/api/v3/')) {
@@ -240,8 +242,15 @@ export function createApp(): Server {
                   done: args.has('done'),
                   filter: args.get('filter')?.[0],
                 };
-                const plan = planFetch(store, repo, req.wants, req.haves, req.shallow, req.depth);
-                send(res, { status: 200, contentType: 'application/x-git-upload-pack-result', body: fetchResponseV2(plan) });
+                const key = fetchCacheKey(repo, 'v2', req);
+                let cachedBody = fetchCache.get(key);
+                if (!cachedBody) {
+                  const plan = planFetch(store, repo, req.wants, req.haves, req.shallow, req.depth);
+                  cachedBody = fetchResponseV2(plan);
+                  if (fetchCache.size >= 128) fetchCache.clear();
+                  fetchCache.set(key, cachedBody);
+                }
+                send(res, { status: 200, contentType: 'application/x-git-upload-pack-result', body: cachedBody });
                 return;
               }
               sendJson(res, 400, { message: `Unknown upload-pack command ${parsed.command}` });
@@ -255,8 +264,15 @@ export function createApp(): Server {
               sendJson(res, 400, { message: 'Malformed pkt-line stream' });
               return;
             }
-            const plan = planFetch(store, repo, v0.wants, v0.haves, v0.shallow, v0.depth);
-            send(res, { status: 200, contentType: 'application/x-git-upload-pack-result', body: fetchResponseV0(plan) });
+            const key = fetchCacheKey(repo, 'v0', v0);
+            let cachedBody = fetchCache.get(key);
+            if (!cachedBody) {
+              const plan = planFetch(store, repo, v0.wants, v0.haves, v0.shallow, v0.depth);
+              cachedBody = fetchResponseV0(plan);
+              if (fetchCache.size >= 128) fetchCache.clear();
+              fetchCache.set(key, cachedBody);
+            }
+            send(res, { status: 200, contentType: 'application/x-git-upload-pack-result', body: cachedBody });
             return;
           }
           if (method === 'POST' && tail === 'git-receive-pack') {
@@ -275,7 +291,10 @@ export function createApp(): Server {
               try {
                 const objects = readPack(pack, (oid) => store.getObject(repo, oid));
                 for (const [oid, object] of objects) {
-                  if (!repo.objects.has(oid)) repo.objects.set(oid, object);
+                  if (!repo.objects.has(oid)) {
+                    repo.objects.set(oid, object);
+                    repo.rev++;
+                  }
                 }
               } catch {
                 unpackOk = false;

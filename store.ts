@@ -171,6 +171,10 @@ export interface Repo {
   /** ref name -> tip oid. */
   refs: Map<string, string>;
   objects: Map<string, GitObject>;
+  /** Bumped on every object added: the upload-pack fetch cache keys on it,
+   * so a cached response can only be reused while the object store is
+   * byte-identical to when the response was computed. */
+  rev: number;
   labels: Map<string, Label>;
   issues: Map<number, Issue>;
   nextIssue: number;
@@ -210,6 +214,7 @@ export class Store {
       createdSeq: this.tick(),
       refs: new Map(),
       objects: new Map(),
+      rev: 0,
       labels: new Map(),
       issues: new Map(),
       nextIssue: 1,
@@ -232,7 +237,10 @@ export class Store {
 
   putObject(repo: Repo, type: GitObjectType, data: Buffer): string {
     const oid = hashObject(type, data);
-    if (!repo.objects.has(oid)) repo.objects.set(oid, { type, data });
+    if (!repo.objects.has(oid)) {
+      repo.objects.set(oid, { type, data });
+      repo.rev++;
+    }
     return oid;
   }
 
@@ -252,8 +260,11 @@ export class Store {
     for (const tip of tips) {
       if (isOid(tip) && tip !== ZERO_OID) queue.push([tip, 0]);
     }
-    while (queue.length > 0) {
-      const [oid, depth] = queue.shift()!;
+    // Index pointer, not shift(): shift() reindexes the array on every pop,
+    // making a 400-commit walk quadratic.
+    let head = 0;
+    while (head < queue.length) {
+      const [oid, depth] = queue[head++]!;
       if (seen.has(oid)) continue;
       const object = repo.objects.get(oid);
       if (!object || object.type !== 'commit') continue;
@@ -349,7 +360,24 @@ export class Store {
   /** True when `ancestor` is reachable from `tip` (or equal to it). */
   isAncestor(repo: Repo, ancestor: string, tip: string): boolean {
     if (ancestor === tip) return true;
-    return this.reachableCommits(repo, [tip]).has(ancestor);
+    // Targeted walk from the tip: stop the moment the ancestor is found.
+    // Same answer as reachableCommits(tip).has(ancestor) in every case — a
+    // full DAG walk when the ancestor is absent — but a fast-forward push
+    // (the common case: the tip's parent IS the current ref) finds it after
+    // parsing a single commit instead of the whole history.
+    const seen = new Set<string>();
+    const queue: string[] = [tip];
+    let head = 0;
+    while (head < queue.length) {
+      const oid = queue[head++]!;
+      if (oid === ancestor) return true;
+      if (seen.has(oid)) continue;
+      seen.add(oid);
+      const object = repo.objects.get(oid);
+      if (!object || object.type !== 'commit') continue;
+      for (const parent of parseCommit(object.data).parents) queue.push(parent);
+    }
+    return false;
   }
 }
 
